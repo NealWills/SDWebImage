@@ -10,8 +10,13 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@interface SDBasePluginActionBlockUnit: NSObject
 
-typedef NSDictionary *_Nullable(^SDBasePluginActionBlock)(NSDictionary *params);
+@property (nonatomic, copy) void(^result)(NSDictionary *params);
+
+@end
+
+typedef SDBasePluginActionBlockUnit *_Nullable(^SDBasePluginActionBlock)(NSDictionary *params);
 
 typedef NS_ENUM(NSInteger, SDWebImageBasePluginStage) {
     SDWebImageBasePluginStageNone = -1,

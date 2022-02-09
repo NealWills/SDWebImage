@@ -9,6 +9,14 @@
 #import "SDWebImageBasePlugin.h"
 #import "SDWebImagePluginManager.h"
 
+@interface SDBasePluginActionBlockUnit ()
+
+@end
+
+@implementation SDBasePluginActionBlockUnit
+
+@end
+
 
 @interface SDWebImageBasePlugin ()
 
