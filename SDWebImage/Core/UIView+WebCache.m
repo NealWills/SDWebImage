@@ -13,6 +13,8 @@
 #import "SDInternalMacros.h"
 #import "SDWebImageTransitionInternal.h"
 #import "SDImageCache.h"
+#import "SDWebImagePluginManager.h"
+#import "SDWebImageBasePlugin.h"
 
 const int64_t SDWebImageProgressUnitCountUnknown = 1LL;
 
@@ -144,83 +146,12 @@ const int64_t SDWebImageProgressUnitCountUnknown = 1LL;
                 imageProgress.completedUnitCount = SDWebImageProgressUnitCountUnknown;
             }
             
-#if SD_UIKIT || SD_MAC
-            // check and stop image indicator
-            if (finished) {
-                [self sd_stopImageIndicator];
-            }
-#endif
-            
-            BOOL shouldCallCompletedBlock = finished || (options & SDWebImageAvoidAutoSetImage);
-            BOOL shouldNotSetImage = ((image && (options & SDWebImageAvoidAutoSetImage)) ||
-                                      (!image && !(options & SDWebImageDelayPlaceholder)));
-            SDWebImageNoParamsBlock callCompletedBlockClosure = ^{
-                if (!self) { return; }
-                if (!shouldNotSetImage) {
-                    [self sd_setNeedsLayout];
-                }
-                if (completedBlock && shouldCallCompletedBlock) {
-                    completedBlock(image, data, error, cacheType, finished, url);
-                }
-            };
-            
-            // case 1a: we got an image, but the SDWebImageAvoidAutoSetImage flag is set
-            // OR
-            // case 1b: we got no image and the SDWebImageDelayPlaceholder is not set
-            if (shouldNotSetImage) {
-                dispatch_main_async_safe(callCompletedBlockClosure);
+            if (error) {
+                [self sd_internalSetImageWithURL:url placeholderImage:placeholder options:options context:context setImageBlock:setImageBlock progress:progressBlock completed:completedBlock];
                 return;
             }
             
-            UIImage *targetImage = nil;
-            NSData *targetData = nil;
-            if (image) {
-                // case 2a: we got an image and the SDWebImageAvoidAutoSetImage is not set
-                targetImage = image;
-                targetData = data;
-            } else if (options & SDWebImageDelayPlaceholder) {
-                // case 2b: we got no image and the SDWebImageDelayPlaceholder flag is set
-                targetImage = placeholder;
-                targetData = nil;
-            }
-            
-#if SD_UIKIT || SD_MAC
-            // check whether we should use the image transition
-            SDWebImageTransition *transition = nil;
-            BOOL shouldUseTransition = NO;
-            if (options & SDWebImageForceTransition) {
-                // Always
-                shouldUseTransition = YES;
-            } else if (cacheType == SDImageCacheTypeNone) {
-                // From network
-                shouldUseTransition = YES;
-            } else {
-                // From disk (and, user don't use sync query)
-                if (cacheType == SDImageCacheTypeMemory) {
-                    shouldUseTransition = NO;
-                } else if (cacheType == SDImageCacheTypeDisk) {
-                    if (options & SDWebImageQueryMemoryDataSync || options & SDWebImageQueryDiskDataSync) {
-                        shouldUseTransition = NO;
-                    } else {
-                        shouldUseTransition = YES;
-                    }
-                } else {
-                    // Not valid cache type, fallback
-                    shouldUseTransition = NO;
-                }
-            }
-            if (finished && shouldUseTransition) {
-                transition = self.sd_imageTransition;
-            }
-#endif
-            dispatch_main_async_safe(^{
-#if SD_UIKIT || SD_MAC
-                [self sd_setImage:targetImage imageData:targetData basedOnClassOrViaCustomSetImageBlock:setImageBlock transition:transition cacheType:cacheType imageURL:imageURL];
-#else
-                [self sd_setImage:targetImage imageData:targetData basedOnClassOrViaCustomSetImageBlock:setImageBlock cacheType:cacheType imageURL:imageURL];
-#endif
-                callCompletedBlockClosure();
-            });
+            [self sd_internalEndSetImageWithURL:url placeholderImage:placeholder options:options context:context setImageBlock:setImageBlock progress:progressBlock completed:completedBlock image:image data:data error:error cacheType:cacheType finished:finished imageURL:imageURL];
         }];
         [self sd_setImageLoadOperation:operation forKey:validOperationKey];
     } else {
@@ -234,6 +165,225 @@ const int64_t SDWebImageProgressUnitCountUnknown = 1LL;
             }
         });
     }
+}
+
+- (void)sd_internalRetrySetImageWithURL:(nullable NSURL *)url
+                       placeholderImage:(nullable UIImage *)placeholder
+                                options:(SDWebImageOptions)options
+                                context:(nullable SDWebImageContext *)context
+                          setImageBlock:(nullable SDSetImageBlock)setImageBlock
+                               progress:(nullable SDImageLoaderProgressBlock)progressBlock
+                              completed:(nullable SDInternalCompletionBlock)completedBlock
+                                  image:(UIImage *)image
+                                   data:(NSData *)data
+                                  error:(NSError *)error
+                              cacheType:(SDImageCacheType)cacheType
+                               finished:(BOOL)finished
+                               imageURL:(NSURL *)imageURL {
+    
+    NSString *originUrl = url.absoluteString;
+    __block SDWebImageBasePlugin *plugin;
+    [SDWebImagePluginManager.sharedManager.pluginList enumerateObjectsUsingBlock:^(__kindof SDWebImageBasePlugin * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+        if (obj.stage == SDWebImageBasePluginStageRequestFailedToRetry) {
+            plugin = obj;
+        }
+    }];
+    if (!plugin) {
+        [self sd_internalEndSetImageWithURL:url placeholderImage:placeholder options:options context:context setImageBlock:setImageBlock progress:progressBlock completed:completedBlock image:image data:data error:error cacheType:cacheType finished:finished imageURL:imageURL];
+        return;
+    }
+    
+    NSDictionary *result = plugin.action(@{@"url": originUrl});
+    NSString *newUrlStr = originUrl;
+    if ([result[@"url"] isKindOfClass:[NSString class]]) {
+        newUrlStr = result[@"url"];
+    }
+    NSURL *newUrl = [NSURL URLWithString:newUrlStr];
+    if (context) {
+        // copy to avoid mutable object
+        context = [context copy];
+    } else {
+        context = [NSDictionary dictionary];
+    }
+    NSString *validOperationKey = context[SDWebImageContextSetImageOperationKey];
+    if (!validOperationKey) {
+        // pass through the operation key to downstream, which can used for tracing operation or image view class
+        validOperationKey = NSStringFromClass([self class]);
+        SDWebImageMutableContext *mutableContext = [context mutableCopy];
+        mutableContext[SDWebImageContextSetImageOperationKey] = validOperationKey;
+        context = [mutableContext copy];
+    }
+    self.sd_latestOperationKey = validOperationKey;
+    [self sd_cancelImageLoadOperationWithKey:validOperationKey];
+    self.sd_imageURL = newUrl;
+    
+    SDWebImageManager *manager = context[SDWebImageContextCustomManager];
+    if (!manager) {
+        manager = [SDWebImageManager sharedManager];
+    } else {
+        // remove this manager to avoid retain cycle (manger -> loader -> operation -> context -> manager)
+        SDWebImageMutableContext *mutableContext = [context mutableCopy];
+        mutableContext[SDWebImageContextCustomManager] = nil;
+        context = [mutableContext copy];
+    }
+    
+    if (newUrl) {
+        // reset the progress
+        NSProgress *imageProgress = objc_getAssociatedObject(self, @selector(sd_imageProgress));
+        if (imageProgress) {
+            imageProgress.totalUnitCount = 0;
+            imageProgress.completedUnitCount = 0;
+        }
+        
+#if SD_UIKIT || SD_MAC
+        // check and start image indicator
+        [self sd_startImageIndicator];
+        id<SDWebImageIndicator> imageIndicator = self.sd_imageIndicator;
+#endif
+        
+        SDImageLoaderProgressBlock combinedProgressBlock = ^(NSInteger receivedSize, NSInteger expectedSize, NSURL * _Nullable targetURL) {
+            if (imageProgress) {
+                imageProgress.totalUnitCount = expectedSize;
+                imageProgress.completedUnitCount = receivedSize;
+            }
+#if SD_UIKIT || SD_MAC
+            if ([imageIndicator respondsToSelector:@selector(updateIndicatorProgress:)]) {
+                double progress = 0;
+                if (expectedSize != 0) {
+                    progress = (double)receivedSize / expectedSize;
+                }
+                progress = MAX(MIN(progress, 1), 0); // 0.0 - 1.0
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [imageIndicator updateIndicatorProgress:progress];
+                });
+            }
+#endif
+            if (progressBlock) {
+                progressBlock(receivedSize, expectedSize, targetURL);
+            }
+        };
+        @weakify(self);
+        id <SDWebImageOperation> operation = [manager loadImageWithURL:newUrl options:options context:context progress:combinedProgressBlock completed:^(UIImage *image1, NSData *data1, NSError *error1, SDImageCacheType cacheType1, BOOL finished1, NSURL *imageURL1) {
+            @strongify(self);
+            if (!self) { return; }
+            // if the progress not been updated, mark it to complete state
+            if (imageProgress && finished && !error && imageProgress.totalUnitCount == 0 && imageProgress.completedUnitCount == 0) {
+                imageProgress.totalUnitCount = SDWebImageProgressUnitCountUnknown;
+                imageProgress.completedUnitCount = SDWebImageProgressUnitCountUnknown;
+            }
+           
+            [self sd_internalEndSetImageWithURL:newUrl placeholderImage:placeholder options:options context:context setImageBlock:setImageBlock progress:progressBlock completed:completedBlock image:image1 data:data1 error:error1 cacheType:cacheType1 finished:finished1 imageURL:imageURL1];
+        }];
+        [self sd_setImageLoadOperation:operation forKey:validOperationKey];
+    } else {
+#if SD_UIKIT || SD_MAC
+        [self sd_stopImageIndicator];
+#endif
+        dispatch_main_async_safe(^{
+            if (completedBlock) {
+                NSError *error1 = [NSError errorWithDomain:SDWebImageErrorDomain code:SDWebImageErrorInvalidURL userInfo:@{NSLocalizedDescriptionKey : @"Image url is nil"}];
+                completedBlock(nil, nil, error1, SDImageCacheTypeNone, YES, newUrl);
+            }
+        });
+    }
+}
+
+
+- (void)sd_internalEndSetImageWithURL:(nullable NSURL *)url
+                     placeholderImage:(nullable UIImage *)placeholder
+                              options:(SDWebImageOptions)options
+                              context:(nullable SDWebImageContext *)context
+                        setImageBlock:(nullable SDSetImageBlock)setImageBlock
+                             progress:(nullable SDImageLoaderProgressBlock)progressBlock
+                            completed:(nullable SDInternalCompletionBlock)completedBlock
+                                image:(UIImage *)image
+                                 data:(NSData *)data
+                                error:(NSError *)error
+                            cacheType:(SDImageCacheType)cacheType
+                             finished:(BOOL)finished
+                             imageURL:(NSURL *)imageURL {
+    
+    @weakify(self);
+    
+    
+#if SD_UIKIT || SD_MAC
+    // check and stop image indicator
+    if (finished) {
+        [self sd_stopImageIndicator];
+    }
+#endif
+    
+    BOOL shouldCallCompletedBlock = finished || (options & SDWebImageAvoidAutoSetImage);
+    BOOL shouldNotSetImage = ((image && (options & SDWebImageAvoidAutoSetImage)) ||
+                              (!image && !(options & SDWebImageDelayPlaceholder)));
+    SDWebImageNoParamsBlock callCompletedBlockClosure = ^{
+        @strongify(self);
+        if (!self) { return; }
+        if (!shouldNotSetImage) {
+            [self sd_setNeedsLayout];
+        }
+        if (completedBlock && shouldCallCompletedBlock) {
+            completedBlock(image, data, error, cacheType, finished, url);
+        }
+    };
+    
+    // case 1a: we got an image, but the SDWebImageAvoidAutoSetImage flag is set
+    // OR
+    // case 1b: we got no image and the SDWebImageDelayPlaceholder is not set
+    if (shouldNotSetImage) {
+        dispatch_main_async_safe(callCompletedBlockClosure);
+        return;
+    }
+    
+    UIImage *targetImage = nil;
+    NSData *targetData = nil;
+    if (image) {
+        // case 2a: we got an image and the SDWebImageAvoidAutoSetImage is not set
+        targetImage = image;
+        targetData = data;
+    } else if (options & SDWebImageDelayPlaceholder) {
+        // case 2b: we got no image and the SDWebImageDelayPlaceholder flag is set
+        targetImage = placeholder;
+        targetData = nil;
+    }
+    
+#if SD_UIKIT || SD_MAC
+    // check whether we should use the image transition
+    SDWebImageTransition *transition = nil;
+    BOOL shouldUseTransition = NO;
+    if (options & SDWebImageForceTransition) {
+        // Always
+        shouldUseTransition = YES;
+    } else if (cacheType == SDImageCacheTypeNone) {
+        // From network
+        shouldUseTransition = YES;
+    } else {
+        // From disk (and, user don't use sync query)
+        if (cacheType == SDImageCacheTypeMemory) {
+            shouldUseTransition = NO;
+        } else if (cacheType == SDImageCacheTypeDisk) {
+            if (options & SDWebImageQueryMemoryDataSync || options & SDWebImageQueryDiskDataSync) {
+                shouldUseTransition = NO;
+            } else {
+                shouldUseTransition = YES;
+            }
+        } else {
+            // Not valid cache type, fallback
+            shouldUseTransition = NO;
+        }
+    }
+    if (finished && shouldUseTransition) {
+        transition = self.sd_imageTransition;
+    }
+#endif
+    dispatch_main_async_safe(^{
+#if SD_UIKIT || SD_MAC
+        [self sd_setImage:targetImage imageData:targetData basedOnClassOrViaCustomSetImageBlock:setImageBlock transition:transition cacheType:cacheType imageURL:imageURL];
+#else
+        [self sd_setImage:targetImage imageData:targetData basedOnClassOrViaCustomSetImageBlock:setImageBlock cacheType:cacheType imageURL:imageURL];
+#endif
+        callCompletedBlockClosure();
+    });
 }
 
 - (void)sd_cancelCurrentImageLoad {
