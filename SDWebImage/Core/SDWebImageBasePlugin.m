@@ -41,4 +41,8 @@
     return @"SDWebImageBasePluginNameDefault";
 }
 
++ (instancetype)plugin {
+    return [[self alloc] init];
+}
+
 @end

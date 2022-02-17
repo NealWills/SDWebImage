@@ -39,6 +39,8 @@ typedef NS_ENUM(NSInteger, SDWebImageBasePluginStage) {
 - (SDWebImageBasePluginStage)stage;
 - (NSString *)name;
 
++ (instancetype)plugin;
+
 @end
 
 NS_ASSUME_NONNULL_END

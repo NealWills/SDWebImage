@@ -31,4 +31,11 @@
     return instance;
 }
 
+- (NSMutableArray<__kindof SDWebImageBasePlugin *> *)pluginList {
+    if (!_pluginList) {
+        _pluginList = [NSMutableArray array];
+    }
+    return _pluginList;
+}
+
 @end
