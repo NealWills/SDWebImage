@@ -199,10 +199,29 @@ const int64_t SDWebImageProgressUnitCountUnknown = 1LL;
     NSDictionary *dic = @{@"url": originUrl, @"pluginName": plugin.name};
     SDBasePluginActionBlockUnit *resultUnit = plugin.action(dic);
     resultUnit.result = ^ (NSDictionary *params) {
-        NSString *newUrlStr = params[@"url"];
-        NSURL *newUrl = [NSURL URLWithString:newUrlStr];
-        @strongify(self);
-        [self sd_internalRetrySecondSetImageWithURL:newUrl placeholderImage:placeholder options:options context:context setImageBlock:setImageBlock progress:progressBlock completed:completedBlock image:image data:data error:error cacheType:cacheType finished:finished imageURL:imageURL pluginParams:params];
+        if ([params[@"decodeUrl"] isKindOfClass:[NSString class]]) {
+            NSString *newUrlStr = params[@"decodeUrl"];
+            NSURL *newUrl = [NSURL URLWithString:newUrlStr];
+            @strongify(self);
+            [self sd_internalRetrySecondSetImageWithURL:newUrl placeholderImage:placeholder options:options context:context setImageBlock:setImageBlock progress:progressBlock completed:completedBlock image:image data:data error:error cacheType:cacheType finished:finished imageURL:imageURL pluginParams:params];
+        }
+        if ([params[@"decodeUrls"] isKindOfClass:[NSArray class]]) {
+            NSArray *urls = params[@"decodeUrls"];
+            [self sd_internalRetrySecondSetImageWithURLs:urls
+                  placeholderImage:placeholder
+                  options:options
+                  context:context
+                  setImageBlock:setImageBlock
+                  progress:progressBlock
+                  completed:completedBlock
+                  image:image
+                  data:data
+                  error:error
+                  cacheType:cacheType
+                  finished:finished
+                  imageURL:imageURL
+                  pluginParams:pluginParams];
+        }
     };
     
 }
@@ -309,6 +328,204 @@ const int64_t SDWebImageProgressUnitCountUnknown = 1LL;
         });
     }
 }
+
+- (void)sd_internalRetrySecondSetImageWithURLs:(nullable NSArray <NSURL *> *)urls
+                       placeholderImage:(nullable UIImage *)placeholder
+                                options:(SDWebImageOptions)options
+                                context:(nullable SDWebImageContext *)context
+                          setImageBlock:(nullable SDSetImageBlock)setImageBlock
+                               progress:(nullable SDImageLoaderProgressBlock)progressBlock
+                              completed:(nullable SDInternalCompletionBlock)completedBlock
+                                  image:(UIImage *)image
+                                   data:(NSData *)data
+                                  error:(NSError *)error
+                              cacheType:(SDImageCacheType)cacheType
+                               finished:(BOOL)finished
+                               imageURL:(NSURL *)imageURL
+                                 pluginParams:(NSDictionary *)pluginParams {
+    if (urls.count < 1) {
+        dispatch_main_async_safe(^{
+            if (completedBlock) {
+                NSError *error1 = [NSError errorWithDomain:SDWebImageErrorDomain code:SDWebImageErrorInvalidURL userInfo:@{NSLocalizedDescriptionKey : @"Image url is nil"}];
+                NSString *originUrlString = @"";
+                if ([pluginParams[@"originUrl"] isKindOfClass:[NSString class]]) {
+                    originUrlString = pluginParams[@"originUrl"];
+                }
+                NSURL *originUrl = [NSURL URLWithString:originUrlString];
+                completedBlock(nil, nil, error1, SDImageCacheTypeNone, YES, originUrl);
+            }
+        });
+        return;
+    }
+
+    [self sd_internalRetrySecondSetImageWithURLs:urls
+                                    currentIndex:0
+                                placeholderImage:placeholder
+                                         options:options
+                                         context:context
+                                   setImageBlock:setImageBlock
+                                        progress:progressBlock
+                                       completed:completedBlock
+                                            image:image
+                                            data:data
+                                           error:error
+                                       cacheType:cacheType
+                                        finished:finished
+                                        imageURL:imageURL
+                                    pluginParams:pluginParams];
+    
+}
+
+
+- (void)sd_internalRetrySecondSetImageWithURLs:(nullable NSArray <NSURL *> *)urls
+        currentIndex:(NSUInteger)currentIndex
+        placeholderImage:(nullable UIImage *)placeholder
+        options:(SDWebImageOptions)options
+        context:(nullable SDWebImageContext *)context
+        setImageBlock:(nullable SDSetImageBlock)setImageBlock
+        progress:(nullable SDImageLoaderProgressBlock)progressBlock
+        completed:(nullable SDInternalCompletionBlock)completedBlock
+        image:(UIImage *)image
+        data:(NSData *)data
+        error:(NSError *)error
+        cacheType:(SDImageCacheType)cacheType
+        finished:(BOOL)finished
+        imageURL:(NSURL *)imageURL
+        pluginParams:(NSDictionary *)pluginParams {
+    
+    if (urls.count <= currentIndex) {
+        dispatch_main_async_safe(^{
+            if (completedBlock) {
+                NSError *error1 = [NSError errorWithDomain:SDWebImageErrorDomain code:SDWebImageErrorInvalidURL userInfo:@{NSLocalizedDescriptionKey : @"Image url is nil"}];
+                NSString *originUrlString = @"";
+                if ([pluginParams[@"originUrl"] isKindOfClass:[NSString class]]) {
+                    originUrlString = pluginParams[@"originUrl"];
+                }
+                NSURL *originUrl = [NSURL URLWithString:originUrlString];
+                completedBlock(nil, nil, error1, SDImageCacheTypeNone, YES, originUrl);
+            }
+        });
+        return;
+    }
+    
+    NSURL *url = urls[currentIndex];
+    
+    if (context) {
+        // copy to avoid mutable object
+        context = [context copy];
+    } else {
+        context = [NSDictionary dictionary];
+    }
+    NSString *validOperationKey = context[SDWebImageContextSetImageOperationKey];
+    if (!validOperationKey) {
+        // pass through the operation key to downstream, which can used for tracing operation or image view class
+        validOperationKey = NSStringFromClass([self class]);
+        SDWebImageMutableContext *mutableContext = [context mutableCopy];
+        mutableContext[SDWebImageContextSetImageOperationKey] = validOperationKey;
+        context = [mutableContext copy];
+    }
+    self.sd_latestOperationKey = validOperationKey;
+    [self sd_cancelImageLoadOperationWithKey:validOperationKey];
+    
+    SDWebImageManager *manager = context[SDWebImageContextCustomManager];
+    if (!manager) {
+        manager = [SDWebImageManager sharedManager];
+    } else {
+        // remove this manager to avoid retain cycle (manger -> loader -> operation -> context -> manager)
+        SDWebImageMutableContext *mutableContext = [context mutableCopy];
+        mutableContext[SDWebImageContextCustomManager] = nil;
+        context = [mutableContext copy];
+    }
+    
+    if (url) {
+        // reset the progress
+        NSProgress *imageProgress = objc_getAssociatedObject(self, @selector(sd_imageProgress));
+        if (imageProgress) {
+            imageProgress.totalUnitCount = 0;
+            imageProgress.completedUnitCount = 0;
+        }
+        
+#if SD_UIKIT || SD_MAC
+        // check and start image indicator
+        [self sd_startImageIndicator];
+        id<SDWebImageIndicator> imageIndicator = self.sd_imageIndicator;
+#endif
+        
+        SDImageLoaderProgressBlock combinedProgressBlock = ^(NSInteger receivedSize, NSInteger expectedSize, NSURL * _Nullable targetURL) {
+            if (imageProgress) {
+                imageProgress.totalUnitCount = expectedSize;
+                imageProgress.completedUnitCount = receivedSize;
+            }
+#if SD_UIKIT || SD_MAC
+            if ([imageIndicator respondsToSelector:@selector(updateIndicatorProgress:)]) {
+                double progress = 0;
+                if (expectedSize != 0) {
+                    progress = (double)receivedSize / expectedSize;
+                }
+                progress = MAX(MIN(progress, 1), 0); // 0.0 - 1.0
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [imageIndicator updateIndicatorProgress:progress];
+                });
+            }
+#endif
+            if (progressBlock) {
+                progressBlock(receivedSize, expectedSize, targetURL);
+            }
+        };
+        @weakify(self);
+        id <SDWebImageOperation> operation = [manager loadImageWithURL:url options:options context:context progress:combinedProgressBlock completed:^(UIImage *image1, NSData *data1, NSError *error1, SDImageCacheType cacheType1, BOOL finished1, NSURL *imageURL1) {
+            @strongify(self);
+            if (image1 == nil) {
+                [self sd_internalRetrySecondSetImageWithURLs:urls
+                      currentIndex:currentIndex + 1
+                      placeholderImage:placeholder
+                      options:options
+                      context:context
+                      setImageBlock:setImageBlock
+                      progress:progressBlock
+                      completed:completedBlock
+                      image:image
+                      data:data
+                      error:error
+                      cacheType:cacheType
+                      finished:finished
+                      imageURL:imageURL
+                      pluginParams:pluginParams];
+            }
+            if (!self) { return; }
+            // if the progress not been updated, mark it to complete state
+            if (imageProgress && finished && !error && imageProgress.totalUnitCount == 0 && imageProgress.completedUnitCount == 0) {
+                imageProgress.totalUnitCount = SDWebImageProgressUnitCountUnknown;
+                imageProgress.completedUnitCount = SDWebImageProgressUnitCountUnknown;
+            }
+           
+            [self sd_internalEndSetImageWithURL:url placeholderImage:placeholder options:options context:context setImageBlock:setImageBlock progress:progressBlock completed:completedBlock image:image1 data:data1 error:error1 cacheType:cacheType1 finished:finished1 imageURL:imageURL1 pluginParams:pluginParams];
+        }];
+        [self sd_setImageLoadOperation:operation forKey:validOperationKey];
+    } else {
+#if SD_UIKIT || SD_MAC
+        [self sd_stopImageIndicator];
+#endif
+        
+        [self sd_internalRetrySecondSetImageWithURLs:urls
+              currentIndex:currentIndex + 1
+              placeholderImage:placeholder
+              options:options
+              context:context
+              setImageBlock:setImageBlock
+              progress:progressBlock
+              completed:completedBlock
+              image:image
+              data:data
+              error:error
+              cacheType:cacheType
+              finished:finished
+              imageURL:imageURL
+              pluginParams:pluginParams];
+
+    }
+}
+
 
 
 - (void)sd_internalEndSetImageWithURL:(nullable NSURL *)url
