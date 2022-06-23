@@ -187,6 +187,34 @@ const int64_t SDWebImageProgressUnitCountUnknown = 1LL;
     [SDWebImagePluginManager.sharedManager.pluginList enumerateObjectsUsingBlock:^(__kindof SDWebImageBasePlugin * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
         if (obj.stage == SDWebImageBasePluginStageRequestFailedToRetry) {
             plugin = obj;
+            @weakify(self);
+            NSDictionary *dic = @{@"url": originUrl, @"pluginName": obj.name};
+            SDBasePluginActionBlockUnit *resultUnit = obj.action(dic);
+            resultUnit.result = ^ (NSDictionary *params) {
+                if ([params[@"decodeUrl"] isKindOfClass:[NSString class]]) {
+                    NSString *newUrlStr = params[@"decodeUrl"];
+                    NSURL *newUrl = [NSURL URLWithString:newUrlStr];
+                    @strongify(self);
+                    [self sd_internalRetrySecondSetImageWithURL:newUrl placeholderImage:placeholder options:options context:context setImageBlock:setImageBlock progress:progressBlock completed:completedBlock image:image data:data error:error cacheType:cacheType finished:finished imageURL:imageURL pluginParams:params];
+                }
+                if ([params[@"decodeUrls"] isKindOfClass:[NSArray class]]) {
+                    NSArray *urls = params[@"decodeUrls"];
+                    [self sd_internalRetrySecondSetImageWithURLs:urls
+                          placeholderImage:placeholder
+                          options:options
+                          context:context
+                          setImageBlock:setImageBlock
+                          progress:progressBlock
+                          completed:completedBlock
+                          image:image
+                          data:data
+                          error:error
+                          cacheType:cacheType
+                          finished:finished
+                          imageURL:imageURL
+                          pluginParams:pluginParams];
+                }
+            };
         }
     }];
     if (!plugin) {
@@ -195,34 +223,7 @@ const int64_t SDWebImageProgressUnitCountUnknown = 1LL;
     }
     
     
-    @weakify(self);
-    NSDictionary *dic = @{@"url": originUrl, @"pluginName": plugin.name};
-    SDBasePluginActionBlockUnit *resultUnit = plugin.action(dic);
-    resultUnit.result = ^ (NSDictionary *params) {
-        if ([params[@"decodeUrl"] isKindOfClass:[NSString class]]) {
-            NSString *newUrlStr = params[@"decodeUrl"];
-            NSURL *newUrl = [NSURL URLWithString:newUrlStr];
-            @strongify(self);
-            [self sd_internalRetrySecondSetImageWithURL:newUrl placeholderImage:placeholder options:options context:context setImageBlock:setImageBlock progress:progressBlock completed:completedBlock image:image data:data error:error cacheType:cacheType finished:finished imageURL:imageURL pluginParams:params];
-        }
-        if ([params[@"decodeUrls"] isKindOfClass:[NSArray class]]) {
-            NSArray *urls = params[@"decodeUrls"];
-            [self sd_internalRetrySecondSetImageWithURLs:urls
-                  placeholderImage:placeholder
-                  options:options
-                  context:context
-                  setImageBlock:setImageBlock
-                  progress:progressBlock
-                  completed:completedBlock
-                  image:image
-                  data:data
-                  error:error
-                  cacheType:cacheType
-                  finished:finished
-                  imageURL:imageURL
-                  pluginParams:pluginParams];
-        }
-    };
+    
     
 }
 
@@ -564,29 +565,22 @@ const int64_t SDWebImageProgressUnitCountUnknown = 1LL;
             [self sd_setNeedsLayout];
         }
         if (error) {
-            __block SDWebImageBasePlugin *plugin;
             [SDWebImagePluginManager.sharedManager.pluginList enumerateObjectsUsingBlock:^(__kindof SDWebImageBasePlugin * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
                 if (obj.stage == SDWebImageBasePluginStageRequestFailed) {
-                    plugin = obj;
+                    NSMutableDictionary *dic = [pluginParams mutableCopy];
+                    dic[@"pluginName"] = obj.name;
+                    obj.action(dic);
                 }
             }];
-            if (plugin) {
-                NSMutableDictionary *dic = [pluginParams mutableCopy];
-                dic[@"pluginName"] = plugin.name;
-                plugin.action(dic);
-            }
+            
         } else {
-            __block SDWebImageBasePlugin *plugin;
             [SDWebImagePluginManager.sharedManager.pluginList enumerateObjectsUsingBlock:^(__kindof SDWebImageBasePlugin * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
                 if (obj.stage == SDWebImageBasePluginStageRequestSuccess) {
-                    plugin = obj;
+                    NSMutableDictionary *dic = [pluginParams mutableCopy];
+                    dic[@"pluginName"] = obj.name;
+                    obj.action(dic);
                 }
             }];
-            if (plugin) {
-                NSMutableDictionary *dic = [pluginParams mutableCopy];
-                dic[@"pluginName"] = plugin.name;
-                plugin.action(dic);
-            }
         }
         if (completedBlock && shouldCallCompletedBlock) {
             completedBlock(image, data, error, cacheType, finished, url);
